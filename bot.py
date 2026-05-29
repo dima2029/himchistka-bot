@@ -5,13 +5,13 @@ A=Дата, B=Телефон+Адрес, C=Қолин адад, D=м/кв, E=м�
 F=Одеяло адад, G=маблаг одеяло, H=Парда кг, I=маблаг парда,
 J=Курпача маблаг, K=Итого умуми
 """
-import logging, sqlite3, io, re, os
+import logging, sqlite3, io, re
 from datetime import datetime, date
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, filters, ContextTypes
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = "СЮДА_ВСТАВЬТЕ_ТОКЕН_БОТА"
 DB_FILE   = "clients.db"
 PRICES    = {"km": 12, "os": 50, "sk": 30, "ps": 70}
 
