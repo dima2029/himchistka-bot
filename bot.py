@@ -1,3 +1,4 @@
+import os
 """
 Telegram бот для химчистки — @toptozazakaz_bot
 Структура Excel:
