@@ -539,6 +539,15 @@ async def add_cancel(update, ctx):
     await update.message.reply_text("❌ Отменено.", reply_markup=MAIN_KB); return ConversationHandler.END
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
+
+async def open_site(update, ctx):
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    await update.message.reply_text(
+        "🌐 Открыть сайт химчистки:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🧺 Открыть", url="https://himchistka-web-production.up.railway.app")
+        ]]))
+
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
@@ -589,10 +598,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-async def open_site(update, ctx):
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    await update.message.reply_text(
-        "🌐 Открыть сайт химчистки:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🧺 Открыть", url="https://himchistka-web-production.up.railway.app")
-        ]]))
