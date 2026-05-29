@@ -50,6 +50,12 @@ def search_by_phone(query):
                         (f"%{query.replace('+','')}%",)).fetchall()
     conn.close(); return rows
 
+def search_any(query):
+    conn = get_conn()
+    q = f"%{query.replace(chr(43),chr(32))}%"
+    rows = conn.execute("SELECT * FROM orders WHERE phone LIKE ? OR addr LIKE ? ORDER BY date DESC",(q,f"%{query}%")).fetchall()
+    conn.close(); return rows
+
 def get_client_history(phone):
     conn = get_conn()
     rows = conn.execute("SELECT * FROM orders WHERE phone=? ORDER BY date DESC", (phone,)).fetchall()
@@ -334,13 +340,13 @@ async def handle_document(update, ctx):
 
 # ─── Поиск ────────────────────────────────────────────────────────────────────
 async def search_start(update, ctx):
-    await update.message.reply_text("🔍 Введите номер телефона:", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("🔍 Введите телефон или адрес:", reply_markup=ReplyKeyboardRemove())
     return SEARCH_INPUT
 
 async def search_do(update, ctx):
-    query = update.message.text.strip().replace("+","").replace(" ","")
+    query = update.message.text.strip()
     if len(query) < 3: await update.message.reply_text("⚠️ Минимум 3 цифры:"); return SEARCH_INPUT
-    rows = search_by_phone(query)
+    rows = search_any(query)
     if not rows: await update.message.reply_text(f"❌ Не найден.", reply_markup=MAIN_KB); return ConversationHandler.END
     phones = list(dict.fromkeys(r["phone"] for r in rows))
     if len(phones) == 1: await _show_client(update.message, phones[0]); return ConversationHandler.END
