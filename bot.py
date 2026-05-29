@@ -188,7 +188,6 @@ MAIN_KB = ReplyKeyboardMarkup(
     [["🔍 Найти клиента", "➕ Добавить заказ"],
      ["📊 Статистика",    "📤 Экспорт Excel"],
      ["📥 Загрузить Excel", "🌐 Открыть сайт"],
-     ["🤖 ИИ-помощник"],
      ["🤖 ИИ-помощник"]],
     resize_keyboard=True,
 )
@@ -215,6 +214,34 @@ async def stats(update, ctx):
     await update.message.reply_text(
         f"📊 *Статистика*\n\n📦 Заказов: *{total_ord:,}*\n👤 Клиентов: *{uniq:,}*\n"
         f"💰 Выручка: *{fmt(total_sum)} сом*\n📈 Средний чек: *{fmt(avg)} сом*\n\n🏆 *Топ-5:*\n{top_lines}",
+        parse_mode="Markdown", reply_markup=MAIN_KB)
+
+# ─── Топ клиентов по рейтингу ─────────────────────────────────────────────────
+async def stars(update, ctx):
+    conn = get_conn(); cur = dict_cursor(conn)
+    cur.execute("""
+        SELECT phone, COUNT(*) AS orders_cnt,
+               COALESCE(SUM(itogo), 0) AS total_sum,
+               COALESCE(AVG(itogo), 0) AS avg_sum
+        FROM orders
+        GROUP BY phone
+        ORDER BY orders_cnt DESC, total_sum DESC
+        LIMIT 10
+    """)
+    top = cur.fetchall(); cur.close(); conn.close()
+    if not top:
+        await update.message.reply_text("❌ База пуста.", reply_markup=MAIN_KB)
+        return
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, r in enumerate(top):
+        medal = medals[i] if i < 3 else f"  {i+1}."
+        lines.append(
+            f"{medal} *+{r['phone']}*\n"
+            f"     📦 {r['orders_cnt']} зак. · 💰 {fmt(r['total_sum'])} сом · ⌀ {fmt(r['avg_sum'])} сом"
+        )
+    await update.message.reply_text(
+        f"⭐ *Топ клиентов по частоте заказов*\n\n" + "\n\n".join(lines),
         parse_mode="Markdown", reply_markup=MAIN_KB)
 
 # ─── Экспорт Excel ────────────────────────────────────────────────────────────
@@ -621,28 +648,43 @@ def main():
         fallbacks=[CommandHandler("cancel", edit_cancel)],
     )
 
+    # ── Command handlers ──────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("^🤖 ИИ-помощник$"), ai_helper))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_answer))
-    app.add_handler(MessageHandler(filters.Regex("^🤖 ИИ-помощник$"), ai_helper))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ai_answer))
-    app.add_handler(MessageHandler(filters.Regex("^🌐 Открыть сайт$"), open_site))
-    app.add_handler(MessageHandler(filters.Regex("^📊 Статистика$"), stats))
-    app.add_handler(MessageHandler(filters.Regex("^📤 Экспорт Excel$"), export_excel))
-    app.add_handler(MessageHandler(filters.Regex("^📥 Загрузить Excel$"), upload_excel_prompt))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(CallbackQueryHandler(on_client_btn, pattern=r"^cl:"))
-    app.add_handler(CallbackQueryHandler(del_ok, pattern=r"^delok:"))
-    app.add_handler(CallbackQueryHandler(del_no, pattern=r"^delno$"))
     app.add_handler(CommandHandler("del", del_order))
     app.add_handler(CommandHandler("edit", edit_order))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("export", export_excel))
+    app.add_handler(CommandHandler("upload", upload_excel_prompt))
+    app.add_handler(CommandHandler("search", search_start))
+    app.add_handler(CommandHandler("stars", stars))
+
+    # ── Conversation handlers (must come before generic text handlers) ─────────
     app.add_handler(search_conv)
     app.add_handler(add_conv)
     app.add_handler(edit_conv)
+
+    # ── Inline keyboard callbacks ─────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(on_client_btn, pattern=r"^cl:"))
+    app.add_handler(CallbackQueryHandler(del_ok, pattern=r"^delok:"))
+    app.add_handler(CallbackQueryHandler(del_no, pattern=r"^delno$"))
+
+    # ── Reply keyboard button handlers ────────────────────────────────────────
+    app.add_handler(MessageHandler(filters.Regex("^🔍 Найти клиента$"), search_start))
+    app.add_handler(MessageHandler(filters.Regex("^➕ Добавить заказ$"), add_start))
+    app.add_handler(MessageHandler(filters.Regex("^📊 Статистика$"), stats))
+    app.add_handler(MessageHandler(filters.Regex("^📤 Экспорт Excel$"), export_excel))
+    app.add_handler(MessageHandler(filters.Regex("^📥 Загрузить Excel$"), upload_excel_prompt))
+    app.add_handler(MessageHandler(filters.Regex("^🌐 Открыть сайт$"), open_site))
+    app.add_handler(MessageHandler(filters.Regex("^🤖 ИИ-помощник$"), ai_helper))
+
+    # ── Document handler ──────────────────────────────────────────────────────
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
+    # ── Generic text handler (AI fallback — must be last) ─────────────────────
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_answer))
 
     logger.info("🧺 Бот @toptozazakaz_bot запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
