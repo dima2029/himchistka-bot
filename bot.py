@@ -1,4 +1,3 @@
-import os
 """
 Telegram бот для химчистки — @toptozazakaz_bot
 Структура Excel:
@@ -6,14 +5,16 @@ A=Дата, B=Телефон+Адрес, C=Қолин адад, D=м/кв, E=м�
 F=Одеяло адад, G=маблаг одеяло, H=Парда кг, I=маблаг парда,
 J=Курпача маблаг, K=Итого умуми
 """
-import logging, sqlite3, io, re, os
+import logging, io, re, os
+import psycopg2
+import psycopg2.extras
 from datetime import datetime, date
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, filters, ContextTypes
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-DB_FILE   = "clients.db"
+BOT_TOKEN = "СЮДА_ВСТАВЬТЕ_ТОКЕН_БОТА"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 PRICES    = {"km": 12, "os": 50, "sk": 30, "ps": 70}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -25,73 +26,83 @@ EDIT_VALUE = 40
 
 # ─── БД ───────────────────────────────────────────────────────────────────────
 def get_conn():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
+
+def dict_cursor(conn):
+    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
 def init_db():
     conn = get_conn()
-    conn.executescript("""
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             phone TEXT NOT NULL, addr TEXT DEFAULT '',
             date TEXT DEFAULT '', itogo REAL DEFAULT 0,
             km REAL DEFAULT 0, os INTEGER DEFAULT 0,
             sk REAL DEFAULT 0, ps INTEGER DEFAULT 0,
             comment TEXT DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS idx_phone ON orders(phone);
+        )
     """)
-    conn.commit(); conn.close()
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_phone ON orders(phone)")
+    conn.commit(); cur.close(); conn.close()
 
 def search_by_phone(query):
+    conn = get_conn(); cur = dict_cursor(conn)
+    cur.execute("SELECT * FROM orders WHERE phone LIKE %s ORDER BY date DESC",
+                        (f"%{query.replace('+','')}%",))
+    rows = cur.fetchall(); cur.close(); conn.close(); return rows
+
+def search_by_addr(query):
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM orders WHERE phone LIKE ? ORDER BY date DESC",
-                        (f"%{query.replace('+','')}%",)).fetchall()
+    rows = conn.execute("SELECT * FROM orders WHERE addr LIKE ? ORDER BY date DESC",
+                        (f"%{query}%",)).fetchall()
     conn.close(); return rows
 
 def search_any(query):
-    conn = get_conn()
-    q = f"%{query.replace(chr(43),chr(32))}%"
-    rows = conn.execute("SELECT * FROM orders WHERE phone LIKE ? OR addr LIKE ? ORDER BY date DESC",(q,f"%{query}%")).fetchall()
-    conn.close(); return rows
+    conn = get_conn(); cur = dict_cursor(conn)
+    q = f"%{query.replace('+','')}%"
+    cur.execute("SELECT * FROM orders WHERE phone LIKE %s OR addr LIKE %s ORDER BY date DESC",
+        (q, f"%{query}%"))
+    rows = cur.fetchall(); cur.close(); conn.close(); return rows
 
 def get_client_history(phone):
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM orders WHERE phone=? ORDER BY date DESC", (phone,)).fetchall()
-    conn.close(); return rows
+    conn = get_conn(); cur = dict_cursor(conn)
+    cur.execute("SELECT * FROM orders WHERE phone=%s ORDER BY date DESC", (phone,))
+    rows = cur.fetchall(); cur.close(); conn.close(); return rows
 
 def get_order_by_id(oid):
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
-    conn.close(); return row
+    conn = get_conn(); cur = dict_cursor(conn)
+    cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
+    row = cur.fetchone(); cur.close(); conn.close(); return row
 
 def add_order(phone, addr, date_str, itogo, km, os_, sk, ps, comment):
-    conn = get_conn()
-    conn.execute("INSERT INTO orders (phone,addr,date,itogo,km,os,sk,ps,comment) VALUES (?,?,?,?,?,?,?,?,?)",
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("INSERT INTO orders (phone,addr,date,itogo,km,os,sk,ps,comment) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                  (phone, addr, date_str, itogo, km, os_, sk, ps, comment))
-    conn.commit(); conn.close()
+    conn.commit(); cur.close(); conn.close()
 
 def delete_order(oid):
-    conn = get_conn()
-    conn.execute("DELETE FROM orders WHERE id=?", (oid,))
-    conn.commit(); conn.close()
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("DELETE FROM orders WHERE id=%s", (oid,))
+    conn.commit(); cur.close(); conn.close()
 
 def update_order_field(oid, field, value):
     if field not in {"addr","date","km","os","sk","ps","comment","itogo"}: return
-    conn = get_conn()
-    conn.execute(f"UPDATE orders SET {field}=? WHERE id=?", (value, oid))
-    conn.commit(); conn.close()
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute(f"UPDATE orders SET {field}=%s WHERE id=%s", (value, oid))
+    conn.commit(); cur.close(); conn.close()
 
 def db_count():
-    conn = get_conn()
-    n = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-    conn.close(); return n
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM orders")
+    n = cur.fetchone()[0]; cur.close(); conn.close(); return n
 
 def get_all_orders():
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM orders ORDER BY date DESC").fetchall()
-    conn.close(); return rows
+    conn = get_conn(); cur = dict_cursor(conn)
+    cur.execute("SELECT * FROM orders ORDER BY date DESC")
+    rows = cur.fetchall(); cur.close(); conn.close(); return rows
 
 # ─── Парсинг телефон+адрес из одной ячейки ───────────────────────────────────
 def parse_phone_addr(cell_value):
@@ -189,12 +200,14 @@ async def start(update, ctx):
 
 # ─── Статистика ───────────────────────────────────────────────────────────────
 async def stats(update, ctx):
-    conn = get_conn()
-    total_ord = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-    total_sum = conn.execute("SELECT COALESCE(SUM(itogo),0) FROM orders").fetchone()[0]
-    uniq      = conn.execute("SELECT COUNT(DISTINCT phone) FROM orders").fetchone()[0]
-    top5      = conn.execute("SELECT phone,COUNT(*) cnt,SUM(itogo) total FROM orders GROUP BY phone ORDER BY total DESC LIMIT 5").fetchall()
-    conn.close()
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM orders"); total_ord = cur.fetchone()[0]
+    cur.execute("SELECT COALESCE(SUM(itogo),0) FROM orders"); total_sum = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(DISTINCT phone) FROM orders"); uniq = cur.fetchone()[0]
+    cur2 = dict_cursor(conn)
+    cur2.execute("SELECT phone,COUNT(*) cnt,SUM(itogo) total FROM orders GROUP BY phone ORDER BY total DESC LIMIT 5")
+    top5 = cur2.fetchall()
+    cur.close(); cur2.close(); conn.close()
     top_lines = "\n".join(f"  {i+1}. +{r['phone']} — {fmt(r['total'])} сом ({r['cnt']} зак.)" for i,r in enumerate(top5))
     avg = total_sum/total_ord if total_ord else 0
     await update.message.reply_text(
@@ -315,19 +328,24 @@ async def handle_document(update, ctx):
             itogo = n(4) + n(6) + n(8) + ps_mabl
 
         # Дубли
-        exists = conn.execute(
-            "SELECT 1 FROM orders WHERE phone=? AND date=? AND itogo=?",
-            (phone, dt, itogo)).fetchone()
+        cur_check = conn.cursor()
+        cur_check.execute(
+            "SELECT 1 FROM orders WHERE phone=%s AND date=%s AND itogo=%s",
+            (phone, dt, itogo))
+        exists = cur_check.fetchone()
+        cur_check.close()
         if exists: dupes += 1; continue
 
         batch.append((phone, addr, dt, itogo, km, os_, sk, ps, ""))
         added += 1
 
     if batch:
-        conn.executemany(
-            "INSERT INTO orders (phone,addr,date,itogo,km,os,sk,ps,comment) VALUES (?,?,?,?,?,?,?,?,?)",
+        cur_ins = conn.cursor()
+        psycopg2.extras.execute_batch(cur_ins,
+            "INSERT INTO orders (phone,addr,date,itogo,km,os,sk,ps,comment) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             batch)
         conn.commit()
+        cur_ins.close()
     conn.close()
 
     await update.message.reply_text(
@@ -340,19 +358,38 @@ async def handle_document(update, ctx):
 
 # ─── Поиск ────────────────────────────────────────────────────────────────────
 async def search_start(update, ctx):
-    await update.message.reply_text("🔍 Введите телефон или адрес:", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("🔍 Введите телефон или адрес клиента:", reply_markup=ReplyKeyboardRemove())
     return SEARCH_INPUT
 
 async def search_do(update, ctx):
     query = update.message.text.strip()
-    if len(query) < 3: await update.message.reply_text("⚠️ Минимум 3 цифры:"); return SEARCH_INPUT
+    if len(query) < 3:
+        await update.message.reply_text("⚠️ Минимум 3 символа:")
+        return SEARCH_INPUT
+
     rows = search_any(query)
-    if not rows: await update.message.reply_text(f"❌ Не найден.", reply_markup=MAIN_KB); return ConversationHandler.END
+    if not rows:
+        await update.message.reply_text(f"❌ Ничего не найдено по запросу «{query}».", reply_markup=MAIN_KB)
+        return ConversationHandler.END
+
     phones = list(dict.fromkeys(r["phone"] for r in rows))
-    if len(phones) == 1: await _show_client(update.message, phones[0]); return ConversationHandler.END
-    btns = [[InlineKeyboardButton(f"📞 +{p}", callback_data=f"cl:{p}")] for p in phones[:10]]
-    await update.message.reply_text(f"Найдено: *{len(phones)}* клиентов:", parse_mode="Markdown",
-                                     reply_markup=InlineKeyboardMarkup(btns))
+    if len(phones) == 1:
+        await _show_client(update.message, phones[0])
+        return ConversationHandler.END
+
+    # Показать список с адресами
+    btns = []
+    seen = set()
+    for r in rows[:10]:
+        if r["phone"] in seen: continue
+        seen.add(r["phone"])
+        label = f"📞 +{r['phone']}"
+        if r["addr"]: label += f" — {r['addr'][:20]}"
+        btns.append([InlineKeyboardButton(label, callback_data=f"cl:{r['phone']}")])
+
+    await update.message.reply_text(
+        f"Найдено: *{len(phones)}* клиентов:", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(btns))
     return ConversationHandler.END
 
 async def search_cancel(update, ctx):
