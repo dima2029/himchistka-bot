@@ -11,7 +11,7 @@ from datetime import datetime, date
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, filters, ContextTypes
 
-BOT_TOKEN = "СЮДА_ВСТАВЬТЕ_ТОКЕН_БОТА"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DB_FILE   = "clients.db"
 PRICES    = {"km": 12, "os": 50, "sk": 30, "ps": 70}
 
