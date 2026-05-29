@@ -5,7 +5,7 @@ A=Дата, B=Телефон+Адрес, C=Қолин адад, D=м/кв, E=м�
 F=Одеяло адад, G=маблаг одеяло, H=Парда кг, I=маблаг парда,
 J=Курпача маблаг, K=Итого умуми
 """
-import logging, sqlite3, io, re
+import logging, sqlite3, io, re, os
 from datetime import datetime, date
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
