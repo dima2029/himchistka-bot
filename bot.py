@@ -187,7 +187,8 @@ def build_history(rows, limit=8):
 MAIN_KB = ReplyKeyboardMarkup(
     [["🔍 Найти клиента", "➕ Добавить заказ"],
      ["📊 Статистика",    "📤 Экспорт Excel"],
-     ["📥 Загрузить Excel", "🌐 Открыть сайт"]],
+     ["📥 Загрузить Excel", "🌐 Открыть сайт"],
+     ["🤖 ИИ-помощник"]],
     resize_keyboard=True,
 )
 
@@ -578,6 +579,8 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex("^🤖 ИИ-помощник$"), ai_helper))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, ai_answer))
     app.add_handler(MessageHandler(filters.Regex("^🌐 Открыть сайт$"), open_site))
     app.add_handler(MessageHandler(filters.Regex("^📊 Статистика$"), stats))
     app.add_handler(MessageHandler(filters.Regex("^📤 Экспорт Excel$"), export_excel))
@@ -598,3 +601,42 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+async def ai_helper(update, ctx):
+    await update.message.reply_text("🤖 Задайте вопрос о вашей базе клиентов:\n\nПримеры:\n• Сколько заработали в мае?\n• Какой клиент самый частый?\n• Топ 5 клиентов по сумме?\n• Сравни январь и февраль")
+    ctx.user_data["ai_mode"] = True
+
+async def ai_answer(update, ctx):
+    if not ctx.user_data.get("ai_mode"): return
+    ctx.user_data["ai_mode"] = False
+    question = update.message.text
+    await update.message.reply_text("⏳ Думаю...")
+    try:
+        import httpx
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*), COALESCE(SUM(itogo),0) FROM orders"); total_cnt, total_sum = cur.fetchone()
+        cur.execute("SELECT COUNT(DISTINCT phone) FROM orders"); uniq = cur.fetchone()[0]
+        cur.execute("SELECT phone, COUNT(*) cnt, SUM(itogo) total FROM orders GROUP BY phone ORDER BY total DESC LIMIT 5"); top5 = cur.fetchall()
+        cur.execute("SELECT date_trunc('month', date::date) as m, COUNT(*), SUM(itogo) FROM orders WHERE date != '' AND date IS NOT NULL GROUP BY m ORDER BY m DESC LIMIT 12"); monthly = cur.fetchall()
+        cur.close(); conn.close()
+        top5_text = "\n".join([f"+{r[0]}: {r[1]} зак., {r[2]:.0f} сом" for r in top5])
+        monthly_text = "\n".join([f"{str(r[0])[:7]}: {r[1]} зак., {r[2]:.0f} сом" for r in monthly if r[0]])
+        context = f"""База данных химчистки:
+Всего заказов: {total_cnt}
+Уникальных клиентов: {uniq}
+Общая выручка: {total_sum:.0f} сом
+
+Топ-5 клиентов по сумме:
+{top5_text}
+
+По месяцам (последние 12):
+{monthly_text}"""
+        resp = httpx.post("https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": os.environ.get("ANTHROPIC_API_KEY",""), "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500,
+                  "messages": [{"role": "user", "content": f"{context}\n\nВопрос: {question}\n\nОтветь коротко и по делу на русском языке."}]},
+            timeout=30)
+        answer = resp.json()["content"][0]["text"]
+        await update.message.reply_text(f"🤖 {answer}", reply_markup=MAIN_KB)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=MAIN_KB)
