@@ -1,37 +1,28 @@
 """
-Telegram бот для химчистки — поиск клиентов и история заказов.
-Бот: @toptozazakaz_bot
+Telegram бот для химчистки — @toptozazakaz_bot
+Структура Excel:
+A=Дата, B=Телефон+Адрес, C=Қолин адад, D=м/кв, E=маблаг ковёр,
+F=Одеяло адад, G=маблаг одеяло, H=Парда кг, I=маблаг парда,
+J=Курпача маблаг, K=Итого умуми
 """
-import logging
-import sqlite3
+import logging, sqlite3, io, re
 from datetime import datetime, date
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ConversationHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, filters, ContextTypes
 
-# ─── Настройки ────────────────────────────────────────────────────────────────
-BOT_TOKEN = "8821892651:AAHRegPFRHwHKJJO147UrF5lN6cz6MKtAjI"   # ← получить у @BotFather
+BOT_TOKEN = "СЮДА_ВСТАВЬТЕ_ТОКЕН_БОТА"
 DB_FILE   = "clients.db"
-
-# Цены за услуги (сом)
-PRICES = {"km": 12, "os": 40, "sk": 30, "ps": 70}
+PRICES    = {"km": 12, "os": 50, "sk": 30, "ps": 70}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── Состояния диалогов ───────────────────────────────────────────────────────
 SEARCH_INPUT = 10
 ADD_PHONE, ADD_ADDR, ADD_DATE, ADD_KM, ADD_OS, ADD_SK, ADD_PS, ADD_COMMENT = range(20, 28)
+EDIT_VALUE = 40
 
-# ─── База данных ──────────────────────────────────────────────────────────────
+# ─── БД ───────────────────────────────────────────────────────────────────────
 def get_conn():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -41,312 +32,467 @@ def init_db():
     conn = get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS orders (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone   TEXT NOT NULL,
-            addr    TEXT DEFAULT '',
-            date    TEXT DEFAULT '',
-            itogo   REAL DEFAULT 0,
-            km      REAL DEFAULT 0,
-            os      INTEGER DEFAULT 0,
-            sk      REAL DEFAULT 0,
-            ps      INTEGER DEFAULT 0,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL, addr TEXT DEFAULT '',
+            date TEXT DEFAULT '', itogo REAL DEFAULT 0,
+            km REAL DEFAULT 0, os INTEGER DEFAULT 0,
+            sk REAL DEFAULT 0, ps INTEGER DEFAULT 0,
             comment TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_phone ON orders(phone);
     """)
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
-def search_by_phone(query: str):
+def search_by_phone(query):
     conn = get_conn()
-    q = f"%{query.replace('+', '')}%"
-    rows = conn.execute(
-        "SELECT * FROM orders WHERE phone LIKE ? ORDER BY date DESC", (q,)
-    ).fetchall()
-    conn.close()
-    return rows
+    rows = conn.execute("SELECT * FROM orders WHERE phone LIKE ? ORDER BY date DESC",
+                        (f"%{query.replace('+','')}%",)).fetchall()
+    conn.close(); return rows
 
-def get_client_history(phone: str):
+def get_client_history(phone):
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM orders WHERE phone=? ORDER BY date DESC", (phone,)
-    ).fetchall()
-    conn.close()
-    return rows
+    rows = conn.execute("SELECT * FROM orders WHERE phone=? ORDER BY date DESC", (phone,)).fetchall()
+    conn.close(); return rows
+
+def get_order_by_id(oid):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    conn.close(); return row
 
 def add_order(phone, addr, date_str, itogo, km, os_, sk, ps, comment):
     conn = get_conn()
-    conn.execute(
-        "INSERT INTO orders (phone,addr,date,itogo,km,os,sk,ps,comment) VALUES (?,?,?,?,?,?,?,?,?)",
-        (phone, addr, date_str, itogo, km, os_, sk, ps, comment)
-    )
-    conn.commit()
-    conn.close()
+    conn.execute("INSERT INTO orders (phone,addr,date,itogo,km,os,sk,ps,comment) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (phone, addr, date_str, itogo, km, os_, sk, ps, comment))
+    conn.commit(); conn.close()
 
-def db_total_count():
+def delete_order(oid):
+    conn = get_conn()
+    conn.execute("DELETE FROM orders WHERE id=?", (oid,))
+    conn.commit(); conn.close()
+
+def update_order_field(oid, field, value):
+    if field not in {"addr","date","km","os","sk","ps","comment","itogo"}: return
+    conn = get_conn()
+    conn.execute(f"UPDATE orders SET {field}=? WHERE id=?", (value, oid))
+    conn.commit(); conn.close()
+
+def db_count():
     conn = get_conn()
     n = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-    conn.close()
-    return n
+    conn.close(); return n
+
+def get_all_orders():
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM orders ORDER BY date DESC").fetchall()
+    conn.close(); return rows
+
+# ─── Парсинг телефон+адрес из одной ячейки ───────────────────────────────────
+def parse_phone_addr(cell_value):
+    """
+    Ячейка вида: '906669329 Гулбута 1' или '077171881 Рахими 12-28'
+    Первое слово = телефон (9 цифр), остальное = адрес
+    """
+    s = str(cell_value).strip()
+    # Найти первое число (телефон) — цифры в начале или после пробела
+    m = re.match(r'^(\d{6,12})\s*(.*)', s)
+    if m:
+        phone = m.group(1).lstrip('0') if len(m.group(1)) > 9 else m.group(1)
+        addr  = m.group(2).strip()
+        return phone, addr
+    return s.replace(" ",""), ""
+
+# ─── Парсинг даты ─────────────────────────────────────────────────────────────
+def parse_date(cell_value):
+    """
+    Форматы: '01,05AM', '01.05AM', '2025-01-05', datetime объект
+    '01,05AM' → год текущий, месяц 05, день 01
+    """
+    if cell_value is None: return ""
+    if isinstance(cell_value, (datetime,)): return cell_value.strftime("%Y-%m-%d")
+    s = str(cell_value).strip()
+    # Формат 01,05AM или 01,05НБ или 01.05AM
+    m = re.match(r'^(\d{1,2})[,.](\d{2})', s)
+    if m:
+        day = int(m.group(1))
+        month = int(m.group(2))
+        year = datetime.now().year
+        try: return f"{year}-{month:02d}-{day:02d}"
+        except: pass
+    # Стандартные форматы
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"):
+        try: return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except: pass
+    return s
 
 # ─── Форматирование ───────────────────────────────────────────────────────────
-def fmt(v):
-    return f"{v:,.0f}".replace(",", " ") if v else "0"
+def fmt(v): return f"{v:,.0f}".replace(",", " ") if v else "0"
 
 def fmt_tags(row):
-    tags = []
-    if row["km"]: tags.append(f"🟦 Ковёр {row['km']}м²")
-    if row["os"]: tags.append(f"🟩 Одеяло {row['os']}шт")
-    if row["sk"]: tags.append(f"🟨 Шторы {row['sk']}кг")
-    if row["ps"]: tags.append(f"🟥 Плед {row['ps']}шт")
-    return "  ".join(tags) if tags else ""
+    t = []
+    if row["km"]: t.append(f"🟦{row['km']}м²")
+    if row["os"]: t.append(f"🟩{row['os']}шт")
+    if row["sk"]: t.append(f"🟨{row['sk']}кг")
+    if row["ps"]: t.append(f"🟥{row['ps']}шт")
+    return "  ".join(t) if t else ""
 
-def build_client_card(rows) -> str:
+def build_card(rows):
     phone = rows[0]["phone"]
     addrs = list(dict.fromkeys(r["addr"] for r in rows if r["addr"]))
     total = sum(r["itogo"] or 0 for r in rows)
     dates = sorted(r["date"] for r in rows if r["date"])
-
     freq = "—"
     if len(dates) > 1:
         try:
-            gaps = [(datetime.strptime(dates[i], "%Y-%m-%d") - datetime.strptime(dates[i-1], "%Y-%m-%d")).days
-                    for i in range(1, len(dates))]
-            avg = round(sum(gaps) / len(gaps))
-            if avg < 14:    freq = f"каждые {avg} дн."
-            elif avg < 60:  freq = f"каждые {avg//7} нед."
-            elif avg < 365: freq = f"каждые {avg//30} мес."
-            else:            freq = f"раз в {avg//365} год"
-        except:
-            pass
+            gaps = [(datetime.strptime(dates[i],"%Y-%m-%d")-datetime.strptime(dates[i-1],"%Y-%m-%d")).days for i in range(1,len(dates))]
+            avg = round(sum(gaps)/len(gaps))
+            freq = f"каждые {avg} дн." if avg<14 else f"каждые {avg//7} нед." if avg<60 else f"каждые {avg//30} мес." if avg<365 else f"раз в {avg//365} год"
+        except: pass
+    return (f"📞 *+{phone}*\n🏠 {addrs[0] if addrs else '—'}\n\n"
+            f"📦 Заказов: *{len(rows)}*\n💰 Сумма: *{fmt(total)} сом*\n"
+            f"🔄 Частота: {freq}\n📅 Первый: {dates[0] if dates else '—'}\n📅 Последний: {dates[-1] if dates else '—'}")
 
-    return (
-        f"📞 *+{phone}*\n"
-        f"🏠 {addrs[0] if addrs else '—'}\n\n"
-        f"📦 Заказов:    *{len(rows)}*\n"
-        f"💰 Сумма:      *{fmt(total)} сом*\n"
-        f"🔄 Частота:    {freq}\n"
-        f"📅 Первый:     {dates[0] if dates else '—'}\n"
-        f"📅 Последний:  {dates[-1] if dates else '—'}"
-    )
-
-def build_order_list(rows, limit=10) -> str:
+def build_history(rows, limit=8):
     lines = [f"*📋 История ({len(rows)} заказов):*\n"]
     for r in list(rows)[:limit]:
-        line = f"`{r['date'] or '—'}` — *{fmt(r['itogo'])} сом*"
+        line = f"`{r['date'] or '—'}` — *{fmt(r['itogo'])} сом*  `#{r['id']}`"
         tags = fmt_tags(r)
         if tags: line += f"\n   {tags}"
         if r["addr"]: line += f"\n   📍 {r['addr']}"
         if r["comment"]: line += f"\n   💬 {r['comment']}"
         lines.append(line + "\n")
     if len(rows) > limit:
-        lines.append(f"_...ещё {len(rows)-limit} заказов_")
+        lines.append(f"_...ещё {len(rows)-limit} заказов_\n")
+    lines.append("✏️ `/edit ID` — редактировать\n🗑 `/del ID` — удалить")
     return "\n".join(lines)
 
 # ─── Меню ─────────────────────────────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup(
-    [["🔍 Найти клиента", "➕ Добавить заказ"], ["📊 Статистика"]],
+    [["🔍 Найти клиента", "➕ Добавить заказ"],
+     ["📊 Статистика",    "📤 Экспорт Excel"],
+     ["📥 Загрузить Excel"]],
     resize_keyboard=True,
 )
 
 # ─── /start ───────────────────────────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def start(update, ctx):
     await update.message.reply_text(
-        f"🧺 *Химчистка — база клиентов*\n\nВ базе: *{db_total_count():,}* записей",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KB,
-    )
+        f"🧺 *Химчистка — база клиентов*\n\nВ базе: *{db_count():,}* записей\n\n"
+        f"📥 Отправьте файл `.xlsx` чтобы загрузить новые заказы",
+        parse_mode="Markdown", reply_markup=MAIN_KB)
 
 # ─── Статистика ───────────────────────────────────────────────────────────────
-async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def stats(update, ctx):
     conn = get_conn()
     total_ord = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
     total_sum = conn.execute("SELECT COALESCE(SUM(itogo),0) FROM orders").fetchone()[0]
     uniq      = conn.execute("SELECT COUNT(DISTINCT phone) FROM orders").fetchone()[0]
-    top5      = conn.execute("""
-        SELECT phone, COUNT(*) cnt, SUM(itogo) total
-        FROM orders GROUP BY phone ORDER BY total DESC LIMIT 5
-    """).fetchall()
+    top5      = conn.execute("SELECT phone,COUNT(*) cnt,SUM(itogo) total FROM orders GROUP BY phone ORDER BY total DESC LIMIT 5").fetchall()
+    conn.close()
+    top_lines = "\n".join(f"  {i+1}. +{r['phone']} — {fmt(r['total'])} сом ({r['cnt']} зак.)" for i,r in enumerate(top5))
+    avg = total_sum/total_ord if total_ord else 0
+    await update.message.reply_text(
+        f"📊 *Статистика*\n\n📦 Заказов: *{total_ord:,}*\n👤 Клиентов: *{uniq:,}*\n"
+        f"💰 Выручка: *{fmt(total_sum)} сом*\n📈 Средний чек: *{fmt(avg)} сом*\n\n🏆 *Топ-5:*\n{top_lines}",
+        parse_mode="Markdown", reply_markup=MAIN_KB)
+
+# ─── Экспорт Excel ────────────────────────────────────────────────────────────
+async def export_excel(update, ctx):
+    await update.message.reply_text("⏳ Готовлю файл...")
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    rows = get_all_orders()
+    wb = openpyxl.Workbook()
+    ws = wb.active; ws.title = "База"
+    headers = ["Санаи","Телефон+Адрес","Қолин адад","м/кв","маблаг","Одеяло адад","маблаг","Парда кг","маблаг","Курпача маблаг","Итого"]
+    fill = PatternFill("solid", fgColor="1E3A5F")
+    font = Font(bold=True, color="FFFFFF")
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.fill = fill; cell.font = font
+        cell.alignment = Alignment(horizontal="center")
+    for r in rows:
+        phone_addr = f"{r['phone']} {r['addr']}".strip()
+        ws.append([r["date"], phone_addr,
+                   r["km"] or "", r["km"] or "", r["km"]*PRICES["km"] if r["km"] else "",
+                   r["os"] or "", r["os"]*PRICES["os"] if r["os"] else "",
+                   r["sk"] or "", r["sk"]*PRICES["sk"] if r["sk"] else "",
+                   r["ps"]*PRICES["ps"] if r["ps"] else "",
+                   r["itogo"]])
+    for i, w in enumerate([12,35,10,10,12,10,12,10,12,12,14], 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    await update.message.reply_document(document=buf, filename=f"Himchistka_{date.today()}.xlsx",
+        caption=f"📊 Экспорт: *{len(rows):,}* записей", parse_mode="Markdown")
+
+# ─── Загрузить Excel ──────────────────────────────────────────────────────────
+async def upload_excel_prompt(update, ctx):
+    await update.message.reply_text(
+        "📥 *Загрузка Excel*\n\n"
+        "Отправьте файл `.xlsx` в формате вашей химчистки:\n\n"
+        "`A` — Санаи (дата: `01,05AM`)\n"
+        "`B` — Телефон + Адрес (`906669329 Гулбута 1`)\n"
+        "`C` — Қолин адад\n"
+        "`D` — м/кв\n"
+        "`E` — маблаг ковёр\n"
+        "`F` — Одеяло адад\n"
+        "`G` — маблаг одеяло\n"
+        "`H` — Парда кг\n"
+        "`I` — маблаг парда\n"
+        "`J` — Курпача маблаг\n"
+        "`K` — Итого умуми",
+        parse_mode="Markdown")
+
+async def handle_document(update, ctx):
+    doc = update.message.document
+    if not doc or not doc.file_name.endswith(".xlsx"):
+        await update.message.reply_text("⚠️ Пожалуйста отправьте файл .xlsx")
+        return
+
+    await update.message.reply_text("⏳ Читаю файл...")
+    import openpyxl
+
+    file = await ctx.bot.get_file(doc.file_id)
+    buf = io.BytesIO()
+    await file.download_to_memory(buf)
+    buf.seek(0)
+
+    try:
+        wb = openpyxl.load_workbook(buf, data_only=True)
+        ws = wb.active
+        all_rows = list(ws.iter_rows(values_only=True))
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка чтения: {e}")
+        return
+
+    added = 0; skipped = 0; dupes = 0
+    conn = get_conn()
+    batch = []
+
+    for row in all_rows:
+        if not row or len(row) < 2: skipped += 1; continue
+
+        # Дата — колонка A
+        dt = parse_date(row[0]) if len(row) > 0 else ""
+
+        # Пропустить строки-заголовки и итоговые строки
+        cell_b = str(row[1]).strip() if row[1] else ""
+        if not cell_b or cell_b.lower() in ("санаи овардан","супорид","итого","жами","б/м",""):
+            skipped += 1; continue
+        # Пропустить если в B нет цифр (заголовок)
+        if not re.search(r'\d{6,}', cell_b):
+            skipped += 1; continue
+
+        # Телефон + адрес — колонка B
+        phone, addr = parse_phone_addr(cell_b)
+        if not phone or len(phone) < 6: skipped += 1; continue
+
+        def n(i):
+            try: return float(row[i]) if i < len(row) and row[i] is not None and str(row[i]).strip() not in ("","0","0.0","0,00") else 0
+            except: return 0
+
+        # C=адад ковёр, D=м/кв, E=маблаг ковёр
+        km    = n(3)   # м/кв (колонка D)
+        # F=адад одеяло, G=маблаг одеяло
+        os_   = int(n(5))  # колонка F
+        # H=кг парда, I=маблаг
+        sk    = n(7)   # кг (колонка H)
+        # J=маблаг курпача (колонка J)
+        ps_mabl = n(9)
+        ps    = int(ps_mabl // PRICES["ps"]) if ps_mabl > 0 else 0
+
+        # K=итого (колонка K)
+        itogo = n(10) if len(row) > 10 else n(4) + n(6) + n(8) + ps_mabl
+
+        if itogo == 0:
+            itogo = n(4) + n(6) + n(8) + ps_mabl
+
+        # Дубли
+        exists = conn.execute(
+            "SELECT 1 FROM orders WHERE phone=? AND date=? AND itogo=?",
+            (phone, dt, itogo)).fetchone()
+        if exists: dupes += 1; continue
+
+        batch.append((phone, addr, dt, itogo, km, os_, sk, ps, ""))
+        added += 1
+
+    if batch:
+        conn.executemany(
+            "INSERT INTO orders (phone,addr,date,itogo,km,os,sk,ps,comment) VALUES (?,?,?,?,?,?,?,?,?)",
+            batch)
+        conn.commit()
     conn.close()
 
-    top_lines = "\n".join(
-        f"  {i+1}. +{r['phone']} — {fmt(r['total'])} сом ({r['cnt']} зак.)"
-        for i, r in enumerate(top5)
-    )
-    avg = total_sum / total_ord if total_ord else 0
     await update.message.reply_text(
-        f"📊 *Статистика базы*\n\n"
-        f"📦 Всего заказов: *{total_ord:,}*\n"
-        f"👤 Уник. клиентов: *{uniq:,}*\n"
-        f"💰 Общая выручка: *{fmt(total_sum)} сом*\n"
-        f"📈 Средний чек: *{fmt(avg)} сом*\n\n"
-        f"🏆 *Топ-5 по сумме:*\n{top_lines}",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KB,
-    )
+        f"✅ *Импорт завершён!*\n\n"
+        f"➕ Добавлено: *{added}*\n"
+        f"🔄 Дубли пропущены: *{dupes}*\n"
+        f"⚠️ Пропущено строк: *{skipped}*\n\n"
+        f"📦 Всего в базе: *{db_count():,}*",
+        parse_mode="Markdown", reply_markup=MAIN_KB)
 
 # ─── Поиск ────────────────────────────────────────────────────────────────────
-async def search_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔍 Введите номер телефона (или часть номера):",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+async def search_start(update, ctx):
+    await update.message.reply_text("🔍 Введите номер телефона:", reply_markup=ReplyKeyboardRemove())
     return SEARCH_INPUT
 
-async def search_do(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip().replace("+", "").replace(" ", "")
-    if len(query) < 3:
-        await update.message.reply_text("⚠️ Минимум 3 цифры. Попробуйте ещё раз:")
-        return SEARCH_INPUT
-
+async def search_do(update, ctx):
+    query = update.message.text.strip().replace("+","").replace(" ","")
+    if len(query) < 3: await update.message.reply_text("⚠️ Минимум 3 цифры:"); return SEARCH_INPUT
     rows = search_by_phone(query)
-    if not rows:
-        await update.message.reply_text(f"❌ Клиент «{query}» не найден.", reply_markup=MAIN_KB)
-        return ConversationHandler.END
-
+    if not rows: await update.message.reply_text(f"❌ Не найден.", reply_markup=MAIN_KB); return ConversationHandler.END
     phones = list(dict.fromkeys(r["phone"] for r in rows))
-
-    if len(phones) == 1:
-        await _show_client_msg(update.message, phones[0])
-        return ConversationHandler.END
-
+    if len(phones) == 1: await _show_client(update.message, phones[0]); return ConversationHandler.END
     btns = [[InlineKeyboardButton(f"📞 +{p}", callback_data=f"cl:{p}")] for p in phones[:10]]
+    await update.message.reply_text(f"Найдено: *{len(phones)}* клиентов:", parse_mode="Markdown",
+                                     reply_markup=InlineKeyboardMarkup(btns))
+    return ConversationHandler.END
+
+async def search_cancel(update, ctx):
+    await update.message.reply_text("Отменено.", reply_markup=MAIN_KB); return ConversationHandler.END
+
+async def on_client_btn(update, ctx):
+    q = update.callback_query; await q.answer()
+    phone = q.data.split(":",1)[1]
+    rows = get_client_history(phone)
+    if not rows: await q.edit_message_text("❌ Не найдено."); return
+    await q.edit_message_text(build_card(rows), parse_mode="Markdown")
+    await q.message.reply_text(build_history(rows), parse_mode="Markdown", reply_markup=MAIN_KB)
+
+async def _show_client(message, phone):
+    rows = get_client_history(phone)
+    if not rows: await message.reply_text("❌ Не найден.", reply_markup=MAIN_KB); return
+    await message.reply_text(build_card(rows), parse_mode="Markdown")
+    await message.reply_text(build_history(rows), parse_mode="Markdown", reply_markup=MAIN_KB)
+
+# ─── Удалить ──────────────────────────────────────────────────────────────────
+async def del_order(update, ctx):
+    try: oid = int(ctx.args[0])
+    except: await update.message.reply_text("❌ `/del 123`", parse_mode="Markdown"); return
+    row = get_order_by_id(oid)
+    if not row: await update.message.reply_text(f"❌ Заказ #{oid} не найден."); return
+    btns = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Удалить", callback_data=f"delok:{oid}"),
+        InlineKeyboardButton("❌ Отмена",  callback_data="delno")]])
     await update.message.reply_text(
-        f"Найдено: *{len(phones)}* клиентов. Выберите:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(btns),
-    )
+        f"⚠️ Удалить *#{oid}*?\n📞 +{row['phone']} | 📅 {row['date']} | 💰 {fmt(row['itogo'])} сом",
+        parse_mode="Markdown", reply_markup=btns)
+
+async def del_ok(update, ctx):
+    q = update.callback_query; await q.answer()
+    delete_order(int(q.data.split(":",1)[1]))
+    await q.edit_message_text(f"✅ Удалён.")
+
+async def del_no(update, ctx):
+    q = update.callback_query; await q.answer()
+    await q.edit_message_text("Отменено.")
+
+# ─── Редактировать ────────────────────────────────────────────────────────────
+async def edit_order(update, ctx):
+    try: oid = int(ctx.args[0])
+    except: await update.message.reply_text("❌ `/edit 123`", parse_mode="Markdown"); return
+    row = get_order_by_id(oid)
+    if not row: await update.message.reply_text(f"❌ Заказ #{oid} не найден."); return
+    ctx.user_data["edit_id"] = oid
+    btns = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📍 Адрес",      callback_data="ef:addr"),
+         InlineKeyboardButton("📅 Дата",        callback_data="ef:date")],
+        [InlineKeyboardButton("🟦 Қолин м²",   callback_data="ef:km"),
+         InlineKeyboardButton("🟩 Одеяло шт",  callback_data="ef:os")],
+        [InlineKeyboardButton("🟨 Парда кг",   callback_data="ef:sk"),
+         InlineKeyboardButton("🟥 Курпача шт", callback_data="ef:ps")],
+        [InlineKeyboardButton("💬 Комментарий", callback_data="ef:comment")],
+    ])
+    await update.message.reply_text(
+        f"✏️ Редактирование *#{oid}*\n📞 +{row['phone']} | 📅 {row['date']} | 💰 {fmt(row['itogo'])} сом\n\nЧто изменить?",
+        parse_mode="Markdown", reply_markup=btns)
+
+async def edit_field(update, ctx):
+    q = update.callback_query; await q.answer()
+    field = q.data.split(":",1)[1]
+    names = {"addr":"Адрес","date":"Дата (ГГГГ-ММ-ДД)","km":"Қолин м²","os":"Одеяло шт","sk":"Парда кг","ps":"Курпача шт","comment":"Комментарий"}
+    ctx.user_data["edit_field"] = field
+    await q.edit_message_text(f"✏️ Введите новое значение для *{names.get(field,field)}*:", parse_mode="Markdown")
+    return EDIT_VALUE
+
+async def edit_value(update, ctx):
+    oid = ctx.user_data.get("edit_id")
+    field = ctx.user_data.get("edit_field")
+    val = update.message.text.strip()
+    try:
+        if field in ("km","sk"): val = float(val)
+        elif field in ("os","ps"): val = int(val)
+    except: await update.message.reply_text("⚠️ Введите число:"); return EDIT_VALUE
+    update_order_field(oid, field, val)
+    if field in ("km","os","sk","ps"):
+        row = get_order_by_id(oid)
+        if row:
+            new_itogo = row["km"]*PRICES["km"]+row["os"]*PRICES["os"]+row["sk"]*PRICES["sk"]+row["ps"]*PRICES["ps"]
+            update_order_field(oid, "itogo", new_itogo)
+    await update.message.reply_text(f"✅ Заказ *#{oid}* обновлён!", parse_mode="Markdown", reply_markup=MAIN_KB)
     return ConversationHandler.END
 
-async def search_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено.", reply_markup=MAIN_KB)
-    return ConversationHandler.END
-
-async def on_client_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    phone = q.data.split(":", 1)[1]
-    rows = get_client_history(phone)
-    if not rows:
-        await q.edit_message_text("❌ Данные не найдены.")
-        return
-    card = build_client_card(rows)
-    hist = build_order_list(rows)
-    await q.edit_message_text(card, parse_mode="Markdown")
-    await q.message.reply_text(hist, parse_mode="Markdown", reply_markup=MAIN_KB)
-
-async def _show_client_msg(message, phone: str):
-    rows = get_client_history(phone)
-    if not rows:
-        await message.reply_text("❌ Клиент не найден.", reply_markup=MAIN_KB)
-        return
-    await message.reply_text(build_client_card(rows), parse_mode="Markdown")
-    await message.reply_text(build_order_list(rows), parse_mode="Markdown", reply_markup=MAIN_KB)
+async def edit_cancel(update, ctx):
+    await update.message.reply_text("Отменено.", reply_markup=MAIN_KB); return ConversationHandler.END
 
 # ─── Добавить заказ ───────────────────────────────────────────────────────────
-async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def add_start(update, ctx):
     ctx.user_data.clear()
-    await update.message.reply_text(
-        "➕ *Новый заказ — Шаг 1/7*\n\n📞 Телефон клиента:",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await update.message.reply_text("➕ *Шаг 1/7* — Телефон клиента:", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
     return ADD_PHONE
 
-async def a_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    p = update.message.text.strip().replace("+", "").replace(" ", "")
-    if len(p) < 5:
-        await update.message.reply_text("⚠️ Слишком короткий номер. Введите ещё раз:")
-        return ADD_PHONE
+async def a_phone(update, ctx):
+    p = update.message.text.strip().replace("+","").replace(" ","")
+    if len(p)<5: await update.message.reply_text("⚠️ Короткий номер:"); return ADD_PHONE
     ctx.user_data["phone"] = p
     ex = get_client_history(p)
-    if ex:
-        await update.message.reply_text(
-            f"ℹ️ Клиент *+{p}* уже в базе: {len(ex)} зак., {fmt(sum(r['itogo'] or 0 for r in ex))} сом",
-            parse_mode="Markdown",
-        )
-    await update.message.reply_text("🏠 *Шаг 2/7* — Адрес (или /skip):", parse_mode="Markdown")
-    return ADD_ADDR
+    if ex: await update.message.reply_text(f"ℹ️ *+{p}* уже в базе: {len(ex)} зак., {fmt(sum(r['itogo'] or 0 for r in ex))} сом", parse_mode="Markdown")
+    await update.message.reply_text("🏠 *Шаг 2/7* — Адрес (или /skip):", parse_mode="Markdown"); return ADD_ADDR
 
-async def a_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["addr"] = update.message.text.strip()
-    await update.message.reply_text(f"📅 *Шаг 3/7* — Дата `ГГГГ-ММ-ДД` (или /skip = сегодня):", parse_mode="Markdown")
-    return ADD_DATE
+async def a_addr(u,c):      c.user_data["addr"]=u.message.text.strip(); await u.message.reply_text("📅 *Шаг 3/7* — Дата `ГГГГ-ММ-ДД` (или /skip):", parse_mode="Markdown"); return ADD_DATE
+async def a_addr_skip(u,c): c.user_data["addr"]=""; await u.message.reply_text("📅 *Шаг 3/7* — Дата `ГГГГ-ММ-ДД` (или /skip):", parse_mode="Markdown"); return ADD_DATE
 
-async def a_addr_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["addr"] = ""
-    await update.message.reply_text(f"📅 *Шаг 3/7* — Дата `ГГГГ-ММ-ДД` (или /skip = сегодня):", parse_mode="Markdown")
-    return ADD_DATE
-
-async def a_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def a_date(update, ctx):
     d = update.message.text.strip()
-    try:
-        datetime.strptime(d, "%Y-%m-%d")
-        ctx.user_data["date"] = d
-    except:
-        await update.message.reply_text("⚠️ Формат: `2025-01-15`", parse_mode="Markdown")
-        return ADD_DATE
-    await update.message.reply_text("🟦 *Шаг 4/7* — Ковёр м² (или /skip):", parse_mode="Markdown")
-    return ADD_KM
+    try: datetime.strptime(d,"%Y-%m-%d"); ctx.user_data["date"]=d
+    except: await update.message.reply_text("⚠️ Формат: `2025-01-15`", parse_mode="Markdown"); return ADD_DATE
+    await update.message.reply_text("🟦 *Шаг 4/7* — Қолин м² (или /skip):", parse_mode="Markdown"); return ADD_KM
+async def a_date_skip(u,c): c.user_data["date"]=str(date.today()); await u.message.reply_text("🟦 *Шаг 4/7* — Қолин м² (или /skip):", parse_mode="Markdown"); return ADD_KM
 
-async def a_date_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["date"] = str(date.today())
-    await update.message.reply_text("🟦 *Шаг 4/7* — Ковёр м² (или /skip):", parse_mode="Markdown")
-    return ADD_KM
+async def _num(u, c, key, cast, ns, msg):
+    try: c.user_data[key]=cast(u.message.text.strip())
+    except: await u.message.reply_text("⚠️ Введите число:"); return ns
+    await u.message.reply_text(msg, parse_mode="Markdown"); return ns+1
 
-async def _num(update, ctx, key, cast, next_state, next_msg):
-    try:
-        ctx.user_data[key] = cast(update.message.text.strip())
-    except:
-        await update.message.reply_text("⚠️ Введите число:")
-        return next_state - 1  # retry same state
-    await update.message.reply_text(next_msg, parse_mode="Markdown")
-    return next_state
+async def a_km(u,c):      return await _num(u,c,"km",float,ADD_KM,"🟩 *Шаг 5/7* — Одеяло шт (или /skip):")
+async def a_km_skip(u,c): c.user_data["km"]=0; await u.message.reply_text("🟩 *Шаг 5/7* — Одеяло шт (или /skip):", parse_mode="Markdown"); return ADD_OS
+async def a_os(u,c):      return await _num(u,c,"os",int,ADD_OS,"🟨 *Шаг 6/7* — Парда кг (или /skip):")
+async def a_os_skip(u,c): c.user_data["os"]=0; await u.message.reply_text("🟨 *Шаг 6/7* — Парда кг (или /skip):", parse_mode="Markdown"); return ADD_SK
+async def a_sk(u,c):      return await _num(u,c,"sk",float,ADD_SK,"🟥 *Шаг 7/7* — Курпача шт (или /skip):")
+async def a_sk_skip(u,c): c.user_data["sk"]=0; await u.message.reply_text("🟥 *Шаг 7/7* — Курпача шт (или /skip):", parse_mode="Markdown"); return ADD_PS
+async def a_ps(u,c):      return await _num(u,c,"ps",int,ADD_PS,"💬 Комментарий (или /skip):")
+async def a_ps_skip(u,c): c.user_data["ps"]=0; await u.message.reply_text("💬 Комментарий (или /skip):"); return ADD_COMMENT
 
-async def a_km(update, ctx):      return await _num(update, ctx, "km", float, ADD_OS, "🟩 *Шаг 5/7* — Одеяло шт (или /skip):")
-async def a_km_skip(update, ctx): ctx.user_data["km"]=0; await update.message.reply_text("🟩 *Шаг 5/7* — Одеяло шт (или /skip):", parse_mode="Markdown"); return ADD_OS
-async def a_os(update, ctx):      return await _num(update, ctx, "os", int,   ADD_SK, "🟨 *Шаг 6/7* — Шторы кг (или /skip):")
-async def a_os_skip(update, ctx): ctx.user_data["os"]=0; await update.message.reply_text("🟨 *Шаг 6/7* — Шторы кг (или /skip):", parse_mode="Markdown"); return ADD_SK
-async def a_sk(update, ctx):      return await _num(update, ctx, "sk", float, ADD_PS, "🟥 *Шаг 7/7* — Плед шт (или /skip):")
-async def a_sk_skip(update, ctx): ctx.user_data["sk"]=0; await update.message.reply_text("🟥 *Шаг 7/7* — Плед шт (или /skip):", parse_mode="Markdown"); return ADD_PS
-async def a_ps(update, ctx):      return await _num(update, ctx, "ps", int,   ADD_COMMENT, "💬 Комментарий (или /skip):")
-async def a_ps_skip(update, ctx): ctx.user_data["ps"]=0; await update.message.reply_text("💬 Комментарий (или /skip):"); return ADD_COMMENT
+async def a_comment(u,c):      c.user_data["comment"]=u.message.text.strip(); return await _save(u,c)
+async def a_comment_skip(u,c): c.user_data["comment"]=""; return await _save(u,c)
 
-async def a_comment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["comment"] = update.message.text.strip()
-    return await _do_save(update, ctx)
-
-async def a_comment_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["comment"] = ""
-    return await _do_save(update, ctx)
-
-async def _do_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = ctx.user_data
-    km, os_, sk, ps = d.get("km",0), d.get("os",0), d.get("sk",0), d.get("ps",0)
-    itogo = km*PRICES["km"] + os_*PRICES["os"] + sk*PRICES["sk"] + ps*PRICES["ps"]
-    add_order(d.get("phone",""), d.get("addr",""), d.get("date", str(date.today())),
-              itogo, km, os_, sk, ps, d.get("comment",""))
-
-    tags = []
-    if km:  tags.append(f"🟦 Ковёр {km}м²")
-    if os_: tags.append(f"🟩 Одеяло {os_}шт")
-    if sk:  tags.append(f"🟨 Шторы {sk}кг")
-    if ps:  tags.append(f"🟥 Плед {ps}шт")
-
+async def _save(update, ctx):
+    d=ctx.user_data
+    km,os_,sk,ps=d.get("km",0),d.get("os",0),d.get("sk",0),d.get("ps",0)
+    itogo=km*PRICES["km"]+os_*PRICES["os"]+sk*PRICES["sk"]+ps*PRICES["ps"]
+    add_order(d.get("phone",""),d.get("addr",""),d.get("date",str(date.today())),itogo,km,os_,sk,ps,d.get("comment",""))
+    tags=[]
+    if km: tags.append(f"🟦{km}м²")
+    if os_: tags.append(f"🟩{os_}шт")
+    if sk: tags.append(f"🟨{sk}кг")
+    if ps: tags.append(f"🟥{ps}шт")
     await update.message.reply_text(
-        f"✅ *Заказ сохранён!*\n\n"
-        f"📞 +{d.get('phone')}\n"
-        f"📅 {d.get('date')}\n"
-        f"{'  '.join(tags) or '—'}\n"
-        f"💰 *Итого: {fmt(itogo)} сом*",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KB,
-    )
+        f"✅ *Заказ сохранён!*\n📞 +{d.get('phone')} | 📅 {d.get('date')}\n{'  '.join(tags) or '—'}\n💰 *{fmt(itogo)} сом*",
+        parse_mode="Markdown", reply_markup=MAIN_KB)
     return ConversationHandler.END
 
-async def add_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Отменено.", reply_markup=MAIN_KB)
-    return ConversationHandler.END
+async def add_cancel(update, ctx):
+    await update.message.reply_text("❌ Отменено.", reply_markup=MAIN_KB); return ConversationHandler.END
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 def main():
@@ -358,27 +504,39 @@ def main():
         states={SEARCH_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_do)]},
         fallbacks=[CommandHandler("cancel", search_cancel)],
     )
-
     add_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ Добавить заказ$"), add_start)],
         states={
             ADD_PHONE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, a_phone)],
-            ADD_ADDR:    [CommandHandler("skip", a_addr_skip),    MessageHandler(filters.TEXT & ~filters.COMMAND, a_addr)],
-            ADD_DATE:    [CommandHandler("skip", a_date_skip),    MessageHandler(filters.TEXT & ~filters.COMMAND, a_date)],
-            ADD_KM:      [CommandHandler("skip", a_km_skip),      MessageHandler(filters.TEXT & ~filters.COMMAND, a_km)],
-            ADD_OS:      [CommandHandler("skip", a_os_skip),      MessageHandler(filters.TEXT & ~filters.COMMAND, a_os)],
-            ADD_SK:      [CommandHandler("skip", a_sk_skip),      MessageHandler(filters.TEXT & ~filters.COMMAND, a_sk)],
-            ADD_PS:      [CommandHandler("skip", a_ps_skip),      MessageHandler(filters.TEXT & ~filters.COMMAND, a_ps)],
+            ADD_ADDR:    [CommandHandler("skip", a_addr_skip), MessageHandler(filters.TEXT & ~filters.COMMAND, a_addr)],
+            ADD_DATE:    [CommandHandler("skip", a_date_skip), MessageHandler(filters.TEXT & ~filters.COMMAND, a_date)],
+            ADD_KM:      [CommandHandler("skip", a_km_skip),   MessageHandler(filters.TEXT & ~filters.COMMAND, a_km)],
+            ADD_OS:      [CommandHandler("skip", a_os_skip),   MessageHandler(filters.TEXT & ~filters.COMMAND, a_os)],
+            ADD_SK:      [CommandHandler("skip", a_sk_skip),   MessageHandler(filters.TEXT & ~filters.COMMAND, a_sk)],
+            ADD_PS:      [CommandHandler("skip", a_ps_skip),   MessageHandler(filters.TEXT & ~filters.COMMAND, a_ps)],
             ADD_COMMENT: [CommandHandler("skip", a_comment_skip), MessageHandler(filters.TEXT & ~filters.COMMAND, a_comment)],
         },
         fallbacks=[CommandHandler("cancel", add_cancel)],
     )
+    edit_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_field, pattern=r"^ef:")],
+        states={EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)]},
+        fallbacks=[CommandHandler("cancel", edit_cancel)],
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^📊 Статистика$"), stats))
-    app.add_handler(CallbackQueryHandler(on_client_button, pattern=r"^cl:"))
+    app.add_handler(MessageHandler(filters.Regex("^📤 Экспорт Excel$"), export_excel))
+    app.add_handler(MessageHandler(filters.Regex("^📥 Загрузить Excel$"), upload_excel_prompt))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(CallbackQueryHandler(on_client_btn, pattern=r"^cl:"))
+    app.add_handler(CallbackQueryHandler(del_ok, pattern=r"^delok:"))
+    app.add_handler(CallbackQueryHandler(del_no, pattern=r"^delno$"))
+    app.add_handler(CommandHandler("del", del_order))
+    app.add_handler(CommandHandler("edit", edit_order))
     app.add_handler(search_conv)
     app.add_handler(add_conv)
+    app.add_handler(edit_conv)
 
     logger.info("🧺 Бот @toptozazakaz_bot запущен!")
     app.run_polling()
