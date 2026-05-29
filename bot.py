@@ -187,7 +187,7 @@ def build_history(rows, limit=8):
 MAIN_KB = ReplyKeyboardMarkup(
     [["🔍 Найти клиента", "➕ Добавить заказ"],
      ["📊 Статистика",    "📤 Экспорт Excel"],
-     ["📥 Загрузить Excel"]],
+     ["📥 Загрузить Excel", "🌐 Открыть сайт"]],
     resize_keyboard=True,
 )
 
@@ -569,6 +569,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex("^🌐 Открыть сайт$"), open_site))
     app.add_handler(MessageHandler(filters.Regex("^📊 Статистика$"), stats))
     app.add_handler(MessageHandler(filters.Regex("^📤 Экспорт Excel$"), export_excel))
     app.add_handler(MessageHandler(filters.Regex("^📥 Загрузить Excel$"), upload_excel_prompt))
@@ -587,3 +588,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+async def open_site(update, ctx):
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    await update.message.reply_text(
+        "🌐 Открыть сайт химчистки:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🧺 Открыть", url="https://himchistka-web-production.up.railway.app")
+        ]]))
